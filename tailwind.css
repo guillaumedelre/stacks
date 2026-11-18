@@ -1,0 +1,44 @@
+@import "tailwindcss";
+@source "./index.html";
+
+/* Same dark variant and theme palette mechanism as Homepage: <html class="dark theme-*"> with --color-* triplets */
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+    --color-theme-50: rgb(var(--color-50));
+    --color-theme-100: rgb(var(--color-100));
+    --color-theme-200: rgb(var(--color-200));
+    --color-theme-300: rgb(var(--color-300));
+    --color-theme-400: rgb(var(--color-400));
+    --color-theme-500: rgb(var(--color-500));
+    --color-theme-600: rgb(var(--color-600));
+    --color-theme-700: rgb(var(--color-700));
+    --color-theme-800: rgb(var(--color-800));
+    --color-theme-900: rgb(var(--color-900));
+}
+
+/* Slate, the Homepage default, until the dashboard theme is copied */
+:root {
+    --color-50: 248 250 252;
+    --color-100: 241 245 249;
+    --color-200: 226 232 240;
+    --color-300: 203 213 225;
+    --color-400: 148 163 184;
+    --color-500: 100 116 139;
+    --color-600: 71 85 105;
+    --color-700: 51 65 85;
+    --color-800: 30 41 59;
+    --color-900: 15 23 42;
+}
+
+body {
+    letter-spacing: -.01em;
+}
+
+details > summary {
+    list-style: none;
+}
+
+details > summary::-webkit-details-marker {
+    display: none;
+}

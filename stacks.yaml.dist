@@ -1,0 +1,14 @@
+# Folders scanned for compose.yaml / docker-compose.yml (they must live under $HOME, mounted read-only)
+roots:
+    - ~/homelab
+max_depth: 4
+
+# Folders skipped, with their subfolders
+exclude: []
+
+# Per project (compose name): profiles checked by default, confirmation before every action
+projects:
+    # Example: a project whose services are split into Compose profiles
+    myapp:
+        profiles: [web, worker]
+        confirm: true

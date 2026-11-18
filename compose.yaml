@@ -1,0 +1,51 @@
+# Description: local tool listing the Docker Compose projects of several folders and starting or stopping them
+volumes:
+    stacks_docker:
+
+networks:
+    traefik:
+        external: true
+
+services:
+    stacks:
+        build: .
+        init: true
+        environment:
+            TZ: Europe/Paris
+            # Same HOME as the host: compose resolves ~ and ${HOME} in the managed projects
+            HOME: ${HOME}
+            DOCKER_CONFIG: /var/lib/stacks/docker
+            STACKS_DASHBOARD_URL: http://homepage:3000
+            # Must match HOMEPAGE_ALLOWED_HOSTS of the homepage stack
+            STACKS_DASHBOARD_HOST: ${IP}.${DOMAIN}
+        networks:
+            - traefik
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            # Same absolute path as the host: the daemon resolves relative bind mounts on the host
+            - ${HOME}:${HOME}:ro
+            - ./stacks.yaml:/etc/stacks/stacks.yaml:ro
+            - stacks_docker:/var/lib/stacks/docker
+        labels:
+            homepage.group: Infrastructure
+            homepage.name: Stacks
+            homepage.icon: https://cdn.jsdelivr.net/gh/selfhst/icons/webp/docker.webp
+            homepage.href: http://${COMPOSE_PROJECT_NAME}.${IP}.${DOMAIN}
+
+            traefik.enable: true
+            traefik.docker.network: traefik
+            traefik.http.services.stacks.loadbalancer.server.port: 8080
+            traefik.http.routers.stacks.entrypoints: web
+            traefik.http.routers.stacks.rule: Host(`${COMPOSE_PROJECT_NAME}.${IP}.${DOMAIN}`)
+            # Same origin as the dashboard for the card buttons loaded by its custom.js
+            traefik.http.routers.stacks-cards.entrypoints: web
+            traefik.http.routers.stacks-cards.rule: Host(`${IP}.${DOMAIN}`) && PathPrefix(`/stacks-api`)
+            traefik.http.routers.stacks-cards.service: stacks
+            traefik.http.routers.stacks-cards.middlewares: stacks-cards-strip
+            traefik.http.middlewares.stacks-cards-strip.stripprefix.prefixes: /stacks-api
+            # Homepage custom.js + cards.js while stacks runs, the repository config stays untouched
+            traefik.http.routers.stacks-customjs.entrypoints: web
+            traefik.http.routers.stacks-customjs.rule: Host(`${IP}.${DOMAIN}`) && Path(`/api/config/custom.js`)
+            traefik.http.routers.stacks-customjs.service: stacks
+            traefik.http.routers.stacks-customjs.middlewares: stacks-customjs-path
+            traefik.http.middlewares.stacks-customjs-path.replacepath.path: /homepage-custom.js

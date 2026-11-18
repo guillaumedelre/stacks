@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="fr" class="theme-slate">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stacks</title>
+<link rel="stylesheet" href="app.css">
+<!-- Same icon as the stacks card in Homepage (homepage.icon in compose.yaml) -->
+<link rel="icon" href="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/docker.webp">
+</head>
+<body class="min-h-screen p-3 font-medium text-sm bg-theme-50 dark:bg-theme-800 text-theme-700 dark:text-theme-200">
+<div id="app" class="p-1">
+    <!-- Homepage "underlined" header style -->
+    <header class="flex flex-wrap items-center gap-x-3 gap-y-2 pb-4 mb-4 border-b-2 border-theme-800/20 dark:border-theme-200/20">
+        <img src="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/webp/docker.webp" alt="" class="h-10 w-10">
+        <div class="mr-auto">
+            <h1 class="text-2xl font-light text-theme-800 dark:text-theme-100">Stacks</h1>
+            <p class="text-xs font-light text-theme-500 dark:text-theme-300">Compositions Docker locales</p>
+        </div>
+        <input id="search" type="search" placeholder="Filtrer (projet, dossier, service)…"
+               class="w-72 max-w-full h-9 px-3 rounded-md text-xs bg-theme-100/20 dark:bg-white/5 placeholder:text-theme-500 dark:placeholder:text-theme-400 outline-none focus:ring-1 focus:ring-theme-500/50">
+        <ul id="filters" class="flex rounded-md bg-theme-100/20 dark:bg-white/5"></ul>
+        <button id="refresh" type="button" data-tip="Relancer la recherche des projets" aria-label="Relancer la recherche des projets"
+                class="h-9 w-9 flex items-center justify-center rounded-md bg-theme-100/20 dark:bg-white/5 hover:bg-theme-300/20 dark:hover:bg-white/10"></button>
+    </header>
+    <main id="list" class="space-y-2"></main>
+</div>
+
+<script src="ui.js"></script>
+<script>
+    const FILTERS = { all: 'Tous', inactive: 'Inactifs', active: 'Actifs' };
+    const STATUS = { running: 'en cours', ok: 'terminé', error: 'échec' };
+    const NO_PROFILE = 'sans profil';
+    const DOT = {
+        ok: 'bg-emerald-500', warn: 'bg-amber-500', off: 'bg-orange-400', none: 'bg-theme-500/50', err: 'bg-rose-500',
+    };
+    const CLS = {
+        card: 'rounded-md p-2 bg-theme-100/20 dark:bg-white/5 shadow-md shadow-theme-900/10 dark:shadow-theme-900/20',
+        block: 'rounded-sm bg-theme-200/50 dark:bg-theme-900/20',
+        muted: 'text-xs font-light text-theme-500 dark:text-theme-300',
+        // Disabled buttons keep their pointer events: their tooltip still says what they do
+        button: 'flex items-center justify-center rounded-md p-1.5 text-xs bg-theme-200/50 dark:bg-theme-900/20 hover:bg-theme-300/30 dark:hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
+        small: 'flex items-center justify-center rounded-md p-1 text-[11px] hover:bg-theme-300/30 dark:hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent',
+        danger: 'hover:text-rose-500',
+        tab: 'm-1 px-3 py-1 rounded-md text-xs uppercase',
+        tabOn: 'bg-theme-300/20 dark:bg-white/10',
+        tabOff: 'hover:bg-theme-100/20 dark:hover:bg-white/5',
+    };
+
+    // Action buttons show an icon, their label goes to the tooltip
+    const ICONS = {
+        Lancer: 'play', Démarrer: 'play', Redémarrer: 'restart', Arrêter: 'stop', Supprimer: 'remove', Créer: 'create',
+        Rebuild: 'build', Pull: 'pull',
+    };
+    const { icon } = window.stacksUi;
+
+    const list = document.getElementById('list');
+    let projects = [], states = {}, filter = 'all';
+    const jobs = {}; // "<project id>", "<project id>#<profile>" or "<project id>:<service>" -> job
+    const expanded = new Set(); // "<project id>#<profile>" groups with their services shown
+    // The list is rebuilt on every refresh: job outputs keep their open state and scroll position across renders
+    const outputs = new Map(); // job id -> { open, scroll, follow }
+
+    function syncTheme() {
+        document.documentElement.classList.toggle('dark', matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+
+    async function api(path, options = {}) {
+        const response = await fetch(path, options);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || response.statusText);
+        return payload;
+    }
+
+    const running = job => job?.status === 'running';
+    const projectBusy = project => running(jobs[project.id]);
+    const containersOf = (project, service) => (states[project.name] || []).filter(c => c.service === service);
+
+    // A running but unhealthy container is not counted as healthy: red dot, named in the label
+    const unhealthy = containers => containers.filter(c => c.state === 'running' && c.health === 'unhealthy');
+
+    const plural = (count, word, words = `${word}s`) => `${count} ${count > 1 ? words : word}`;
+    // Comma separated: a tooltip one name per line would outgrow the iframe for 50+ containers
+    const names = containers => containers.map(c => c.service || c.name).sort().join(', ');
+
+    // Project summary as chips: one per container state present, details in their tooltip
+    function stateOf(project) {
+        const containers = states[project.name] || [];
+        const by = (...wanted) => containers.filter(c => wanted.includes(c.state));
+        const up = by('running'), restarting = by('restarting'), created = by('created');
+        const stopped = by('exited', 'dead', 'paused', 'removing');
+        const sick = unhealthy(containers);
+        if (project.error) {
+            return { dot: DOT.err, active: false, chips: [['err', 'config invalide', 'docker compose config en échec, détail ci-dessous']] };
+        }
+        if (!containers.length) {
+            return { dot: DOT.none, active: false, chips: [['none', 'aucun conteneur', 'Jamais lancé, ou supprimé (down)']] };
+        }
+        const chips = [
+            up.length && ['ok', plural(up.length, 'actif'), `En marche :\n${names(up)}`],
+            sick.length && ['err', `${sick.length} unhealthy`, `Healthcheck en échec :\n${names(sick)}`],
+            restarting.length && ['warn', plural(restarting.length, 'en boucle', 'en boucle'), `Redémarrages en boucle :\n${names(restarting)}`],
+            stopped.length && ['off', plural(stopped.length, 'arrêté'), `Arrêtés :\n${names(stopped)}`],
+            created.length && ['none', plural(created.length, 'créé'), `Créés, jamais démarrés :\n${names(created)}`],
+        ].filter(Boolean);
+        const active = up.length + restarting.length > 0;
+        const dot = sick.length ? DOT.err : !active ? DOT.off : up.length === containers.length ? DOT.ok : DOT.warn;
+        return { dot, active, chips };
+    }
+
+    const CHIP = {
+        ok: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',
+        warn: 'bg-amber-500/15 text-amber-700 dark:text-amber-300',
+        err: 'bg-rose-500/15 text-rose-700 dark:text-rose-300',
+        off: 'bg-orange-400/15 text-orange-700 dark:text-orange-300',
+        none: 'bg-theme-500/15 text-theme-600 dark:text-theme-300',
+    };
+
+    function chips(state, job) {
+        const box = el('div', 'flex flex-wrap items-center gap-1');
+        if (running(job)) {
+            const chip = el('span', `inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${CHIP.warn}`);
+            chip.append(icon('pending', 12), `${job.action} en cours`);
+            chip.firstChild.classList.add('animate-spin');
+            box.append(chip);
+            return box;
+        }
+        for (const [tone, label, tip] of state.chips) {
+            const chip = el('span', `inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] whitespace-nowrap ${CHIP[tone]}`);
+            chip.append(el('span', `h-1.5 w-1.5 rounded-full ${DOT[tone]}`), label);
+            chip.dataset.tip = tip;
+            box.append(chip);
+        }
+        return box;
+    }
+
+    function serviceState(project, service) {
+        const containers = containersOf(project, service);
+        if (!containers.length) return { dot: DOT.none, label: 'pas de conteneur', active: false };
+        const restarting = containers.some(c => c.state === 'restarting');
+        const up = containers.some(c => c.state === 'running');
+        const sick = unhealthy(containers).length > 0;
+        const starting = containers.some(c => c.state === 'running' && c.health === 'starting');
+        const dot = sick ? DOT.err : restarting || starting ? DOT.warn : up ? DOT.ok : DOT.off;
+        return { dot, label: containers.map(c => c.status).join(', '), active: up || restarting, sick };
+    }
+
+    function render() {
+        const search = document.getElementById('search').value.toLowerCase();
+        const visible = [];
+        for (const project of projects) {
+            const active = stateOf(project).active;
+            if ((filter === 'active' && !active) || (filter === 'inactive' && active)) continue;
+            const services = Object.keys(project.services);
+            if (!search || project.name.includes(search) || project.dir.toLowerCase().includes(search)) {
+                visible.push(renderProject(project, services, false));
+                continue;
+            }
+            const matching = services.filter(s => s.toLowerCase().includes(search));
+            if (matching.length) visible.push(renderProject(project, matching, true));
+        }
+        list.replaceChildren(...visible);
+        if (!visible.length) list.replaceChildren(el('p', `${CLS.muted} p-2`, 'Aucun projet.'));
+        restoreScroll();
+    }
+
+    // scrollTop only applies once the element is in the document
+    function restoreScroll() {
+        for (const pre of list.querySelectorAll('details[open] pre[data-job]')) {
+            const view = outputs.get(pre.dataset.job);
+            pre.scrollTop = view.follow ? pre.scrollHeight : view.scroll;
+        }
+    }
+
+    function renderProject(project, services, forceOpen) {
+        const state = stateOf(project);
+        const job = jobs[project.id];
+        const locked = projectBusy(project) || project.self || !!project.error;
+        const launchTitle = project.profiles.length
+            ? `Profils lancés : ${project.default_profiles.join(', ') || 'aucun, services sans profil uniquement'} (stacks.yaml)` : '';
+
+        const header = el('div', 'flex flex-wrap items-center gap-2');
+        const title = el('div', 'flex-1 min-w-0');
+        title.append(el('div', 'truncate', project.name),
+            el('div', `${CLS.muted} truncate`, project.display_dir + (project.self ? ' · ce service, non pilotable ici' : '')));
+        const actions = el('div', 'flex gap-1');
+        actions.append(
+            button('Lancer', CLS.button, locked, () => run(project, 'up'), launchTitle),
+            button('Redémarrer', CLS.button, locked || !state.active, () => run(project, 'restart'),
+                'docker compose restart : ne recrée pas les conteneurs, une modification du compose ou du .env demande Lancer'),
+            button('Arrêter', CLS.button, locked || !state.active, () => run(project, 'stop')),
+            button('Supprimer', CLS.button, locked || !(states[project.name] || []).length, () => run(project, 'down'),
+                'docker compose down : supprime les conteneurs, garde les volumes'),
+        );
+        header.append(dot(state.dot), title,
+            chips(state, job), actions);
+
+        const card = el('section', CLS.card);
+        card.append(header);
+        if (project.error) card.append(el('p', 'mt-2 text-xs text-rose-500 break-words', project.error));
+        if (job) card.append(jobOutput(job));
+        const orphans = orphansOf(project);
+        if (orphans.length) card.append(renderOrphans(project, orphans, locked));
+
+        if (services.length) {
+            const groups = el('div', 'mt-2 space-y-1');
+            for (const [group, members] of groupByProfile(project, services)) groups.append(renderGroup(project, group, members, forceOpen));
+            card.append(groups);
+        }
+        return card;
+    }
+
+    // Containers left by a service renamed or removed from the compose file; unknown while the config is invalid
+    function orphansOf(project) {
+        if (project.error) return [];
+        return (states[project.name] || []).filter(c => !(c.service in project.services));
+    }
+
+    function renderOrphans(project, orphans, locked) {
+        const box = el('div', `${CLS.block} mt-2 p-1 flex flex-wrap items-center gap-2`);
+        box.append(dot(DOT.warn, 'h-2 w-2 ml-1'),
+            el('span', 'text-xs', `${orphans.length} conteneur${orphans.length > 1 ? 's' : ''} orphelin${orphans.length > 1 ? 's' : ''}`),
+            el('span', `${CLS.muted} truncate`, orphans.map(c => `${c.name} (${c.state})`).join(', ')),
+            el('div', 'ml-auto flex', ''));
+        box.lastChild.append(button('Supprimer', CLS.small, locked, () => {
+            if (confirm(`Supprimer ${orphans.map(c => c.name).join(', ')} ?`)) run(project, 'remove-orphans', [], project.id, '', true);
+        }, 'docker rm --force : services absents du compose, renommés ou supprimés'));
+        return box;
+    }
+
+    // A service with several profiles shows up in each of them
+    function groupByProfile(project, services) {
+        const groups = new Map([[NO_PROFILE, []], ...project.profiles.map(p => [p, []])]);
+        for (const service of services) {
+            const profiles = project.services[service];
+            for (const group of profiles.length ? profiles : [NO_PROFILE]) groups.get(group).push(service);
+        }
+        return [...groups].filter(([, members]) => members.length);
+    }
+
+    function renderGroup(project, group, members, forceOpen) {
+        const key = `${project.id}#${group}`;
+        const open = forceOpen || expanded.has(key);
+        const job = jobs[key];
+        const memberStates = members.map(s => serviceState(project, s));
+        const up = memberStates.filter(s => s.active).length;
+        const sick = memberStates.filter(s => s.sick).length;
+        const missing = members.filter(s => !containersOf(project, s).length);
+        const locked = projectBusy(project) || running(job) || project.self || !!project.error;
+
+        const header = el('div', 'flex flex-wrap items-center gap-2 px-1 py-1 cursor-pointer select-none');
+        header.dataset.tip = open ? 'Masquer les services' : 'Afficher les services';
+        header.onclick = event => {
+            if (event.target.closest('button')) return;
+            open ? expanded.delete(key) : expanded.add(key);
+            render();
+        };
+        const actions = el('div', 'ml-auto flex gap-1');
+        actions.append(
+            button('Créer', CLS.small, locked || !missing.length, () => run(project, 'create', missing, key, group),
+                'Crée les conteneurs manquants sans les démarrer : ils apparaissent dans Homepage'),
+            button('Démarrer', CLS.small, locked, () => run(project, 'up', members, key, group), 'Démarre aussi leurs dépendances (depends_on)'),
+            button('Redémarrer', CLS.small, locked || !up, () => run(project, 'restart', members, key, group)),
+            button('Arrêter', CLS.small, locked || !up, () => run(project, 'stop', members, key, group)),
+            ...updateButtons(project, members, locked, key, group),
+        );
+        const chevron = el('span', `${CLS.muted} inline-flex transition-transform ${open ? 'rotate-90' : ''}`);
+        chevron.append(icon('chevron', 14));
+        header.append(chevron,
+            dot(sick ? DOT.err : up === members.length ? DOT.ok : up ? DOT.warn : DOT.none),
+            el('span', 'text-xs uppercase', project.profiles.length ? group : 'services'),
+            el('span', CLS.muted, `${up}/${members.length} actifs${sick ? `, ${sick} unhealthy` : ''}`), actions);
+
+        const box = el('div', `${CLS.block} p-1`);
+        box.append(header);
+        if (job) box.append(jobOutput(job));
+        if (open) for (const service of members) box.append(...renderService(project, service));
+        return box;
+    }
+
+    function renderService(project, service) {
+        const state = serviceState(project, service);
+        const key = `${project.id}:${service}`;
+        const job = jobs[key];
+        const locked = projectBusy(project) || running(job) || project.self || !!project.error;
+        const row = el('div', 'flex flex-wrap items-center gap-2 pl-5 pr-1 py-0.5 rounded-sm hover:bg-theme-300/10 dark:hover:bg-white/5');
+        const actions = el('div', 'ml-auto flex gap-1');
+        actions.append(
+            button('Créer', CLS.small, locked || containersOf(project, service).length > 0, () => run(project, 'create', [service], key, service),
+                'Crée le conteneur sans le démarrer : il apparaît dans Homepage'),
+            button('Démarrer', CLS.small, locked, () => run(project, 'up', [service], key, service), 'Démarre aussi ses dépendances (depends_on)'),
+            button('Redémarrer', CLS.small, locked || !state.active, () => run(project, 'restart', [service], key, service)),
+            button('Arrêter', CLS.small, locked || !state.active, () => run(project, 'stop', [service], key, service)),
+            ...updateButtons(project, [service], locked, key, service),
+        );
+        row.append(dot(state.dot, 'h-2 w-2'), el('span', 'text-xs break-all', service),
+            el('span', `${CLS.muted} truncate`, running(job) ? `${job.action} en cours…` : state.label), actions);
+        return job ? [row, jobOutput(job)] : [row];
+    }
+
+    // Services with a build section are rebuilt, the others pulled
+    function updateButtons(project, services, locked, key, target) {
+        const buildable = services.filter(s => project.buildable.includes(s));
+        const pullable = services.filter(s => !project.buildable.includes(s));
+        const buttons = [];
+        if (buildable.length) buttons.push(button('Rebuild', CLS.small, locked, () => run(project, 'build', buildable, key, target),
+            `docker compose up --detach --build : ${buildable.join(', ')}`));
+        if (pullable.length) buttons.push(button('Pull', CLS.small, locked, () => run(project, 'pull', pullable, key, target),
+            `docker compose pull, sans redémarrer : ${pullable.join(', ')}`));
+        return buttons;
+    }
+
+    function jobOutput(job) {
+        if (!outputs.has(job.id)) outputs.set(job.id, { open: null, scroll: 0, follow: true });
+        const view = outputs.get(job.id);
+        const details = document.createElement('details');
+        details.className = 'mt-1';
+        // Until the user opens or closes it, the output is shown while running or failed
+        details.open = view.open ?? job.status !== 'ok';
+        const tone = { running: 'text-amber-500', ok: 'text-emerald-500', error: 'text-rose-500' }[job.status];
+        const summary = el('summary', `${CLS.muted} cursor-pointer select-none font-mono truncate`);
+        // A click, not the toggle event, which also fires when the render sets the open attribute
+        summary.onclick = () => {
+            view.open = !details.open;
+            requestAnimationFrame(restoreScroll);
+        };
+        summary.append(el('span', tone, `● ${STATUS[job.status]}`), ` ${job.command}`);
+        const pre = el('pre', `${CLS.block} mt-1 max-h-40 overflow-auto p-2 font-mono text-[11px] font-light whitespace-pre-wrap`, job.output.join('\n') || '…');
+        pre.dataset.job = job.id;
+        // Following the tail until the user scrolls up, as a terminal does
+        pre.onscroll = () => {
+            view.scroll = pre.scrollTop;
+            view.follow = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+        };
+        details.append(summary, pre);
+        return details;
+    }
+
+    function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    }
+
+    function dot(color, size = 'h-3 w-3') {
+        return el('span', `shrink-0 rounded-full ${size} ${color}`);
+    }
+
+    function button(label, className, disabled, onclick, title = '') {
+        const name = ICONS[label];
+        const node = el('button', name === 'remove' ? `${className} ${CLS.danger}` : className, name ? undefined : label);
+        node.type = 'button';
+        node.disabled = disabled;
+        if (name) {
+            node.append(icon(name, className === CLS.small ? 14 : 16));
+            node.setAttribute('aria-label', label);
+            node.dataset.tip = title ? `${label}\n${title}` : label;
+        } else if (title) node.dataset.tip = title;
+        node.onclick = onclick;
+        return node;
+    }
+
+    function renderFilters() {
+        const bar = document.getElementById('filters');
+        bar.replaceChildren(...Object.entries(FILTERS).map(([value, label]) => {
+            const item = el('li', 'flex');
+            item.append(button(label, `${CLS.tab} ${value === filter ? CLS.tabOn : CLS.tabOff}`, false, () => {
+                filter = value;
+                renderFilters();
+                render();
+            }));
+            return item;
+        }));
+    }
+
+    // Only in a secure context (HTTPS or localhost); asked on the first action, a user gesture being required
+    function askNotifications() {
+        if (window.Notification?.permission === 'default') Notification.requestPermission().catch(() => {});
+    }
+
+    // Shown when the job ends while the page is in the background
+    function notifyDone(job, label) {
+        if (!document.hidden || window.Notification?.permission !== 'granted') return;
+        const failed = job.status !== 'ok';
+        new Notification(`${failed ? '✗' : '✓'} ${label}`, {
+            body: failed ? job.output.slice(-3).join('\n') : job.command, tag: `stacks-${job.id}`,
+        });
+    }
+
+    async function run(project, action, services = [], key = project.id, target = '', confirmed = false) {
+        askNotifications();
+        const profiles = services.length ? [] : project.default_profiles;
+        if (!confirmed && (project.confirm || action === 'down') && !confirm(`${action} sur ${target ? `${project.name} / ${target}` : project.name} ?`)) return;
+        try {
+            jobs[key] = await api(`api/projects/${project.id}/${action}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Stacks-Request': '1' },
+                body: JSON.stringify({ profiles, services }),
+            });
+            render();
+            followJob(key, `${action} ${target ? `${project.name} / ${target}` : project.name}`);
+        } catch (error) {
+            alert(error.message);
+        }
+    }
+
+    async function followJob(key, label) {
+        while (running(jobs[key])) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            jobs[key] = await api(`api/jobs/${jobs[key].id}`);
+            render();
+        }
+        notifyDone(jobs[key], label);
+    }
+
+    // Pushed on each Docker event
+    function subscribeStates(onChange) {
+        new EventSource('api/events').onmessage = event => onChange(JSON.parse(event.data));
+    }
+
+    async function refreshStates() {
+        states = await api('api/states');
+        render();
+    }
+
+    async function refreshProjects() {
+        list.replaceChildren(el('p', `${CLS.muted} p-2`, 'Recherche des projets…'));
+        projects = await api('api/projects');
+        await refreshStates();
+    }
+
+    syncTheme();
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncTheme);
+    renderFilters();
+    document.getElementById('search').oninput = render;
+    document.getElementById('refresh').append(icon('refresh', 16));
+    document.getElementById('refresh').onclick = refreshProjects;
+    window.stacksUi.installTooltips();
+    refreshProjects().catch(error => list.replaceChildren(el('p', 'p-2 text-xs text-rose-500', error.message)));
+    subscribeStates(payload => {
+        states = payload.projects;
+        render();
+    });
+</script>
+</body>
+</html>
