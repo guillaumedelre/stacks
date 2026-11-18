@@ -313,9 +313,11 @@
         emergency: 'error', emerg: 'error', alert: 'error', critical: 'error', crit: 'error', fatal: 'error',
         panic: 'error', dpanic: 'error', error: 'error', err: 'error', severe: 'error',
         warning: 'warn', warn: 'warn', notice: 'info', info: 'info', information: 'info', debug: 'debug', trace: 'debug',
+        // zerolog console writer (Traefik): three-letter upper-case levels
+        ftl: 'error', pnc: 'error', wrn: 'warn', inf: 'info', dbg: 'debug', trc: 'debug',
     };
     const TAGGED = /"(?:level|level_name|severity|lvl)"\s*:\s*"?(\w+)|\b(?:level|lvl|severity)=["']?(\w+)|[a-z_]\.([A-Z]+):\s|\[(\w+)\]/gi;
-    const BARE = /\b(EMERGENCY|ALERT|CRITICAL|CRIT|FATAL|PANIC|ERROR|ERR|WARNING|WARN|NOTICE|INFO|DEBUG|TRACE)\b/;
+    const BARE = /\b(EMERGENCY|ALERT|CRITICAL|CRIT|FATAL|PANIC|FTL|PNC|ERROR|ERR|WARNING|WARN|WRN|NOTICE|INFO|INF|DEBUG|DBG|TRACE|TRC)\b/;
     const CONTINUATION = /^(\s|#\d+ |at |Caused by|Stack trace|\.\.\. \d+ more)/;
 
     function levelOf(text, previous) {
